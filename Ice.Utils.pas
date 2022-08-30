@@ -15,6 +15,10 @@ interface
 
 {$IFDEF FPC}{$Mode Delphi}{$ENDIF}
 
+{$IF CompilerVersion >= 24} // System.Pos with offset starting from XE3
+  {$DEFINE CAPS_POS_WITH_OFFSET}
+{$IFEND}
+
 uses
   {$IFDEF MSWINDOWS} Windows, {$ENDIF}
   TypInfo, SysUtils, Types;
@@ -107,7 +111,7 @@ const
   function Compare(Item1, Item2: Pointer): TCompareRes; overload; inline;
   // Get 1st char of string or #0 if it's empty
   function FirstChar(const Str: string): Char; inline;
-  {$IFNDEF RAD_XE3_UP} // System.Pos with offset starting from XE3
+  {$IFNDEF CAPS_POS_WITH_OFFSET} // System.Pos with offset starting from XE3
   function Pos(const SubStr, Str: string; Offset: Integer): Integer; overload;
   {$ENDIF}
   // Check if Str starts from SubStr without copying by direct memory comparison
@@ -334,7 +338,7 @@ end;
 
 // ********* Strings ********* \\
 
-{$IFNDEF RAD_XE3_UP} // System.Pos with offset starting from XE3
+{$IFNDEF CAPS_POS_WITH_OFFSET}
 // PosEx analog, implemented to not use StrUtils
 // Copyright(c) 1995-2011 Embarcadero Technologies, Inc.
 function Pos(const SubStr, Str: string; Offset: Integer): Integer;
