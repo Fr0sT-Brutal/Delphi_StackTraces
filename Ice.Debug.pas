@@ -1,10 +1,9 @@
 (*******************************************************
-              Useful functions and classes
-  COMPATIBILITY:
+  Call stacks, MAP files
+  Compatibility:
     Compiler: D2010+, FPC
     Platform: x86, x64
-    OS: Windows, Posix (partially)
-
+    ОС: Windows
   (c) Fr0sT-Brutal https://github.com/Fr0sT-Brutal
   LICENSE MPL-2.0
 *******************************************************)
@@ -51,7 +50,10 @@ function GetAddrInfo(Addr: Pointer; const LineAddrs: TArray<TMapFileLineAddrInfo
   const PublicAddrs: TArray<TMapFilePublicAddrInfo>; out AddrInfo: TMapFileAddrInfo): Boolean; overload;
 // Return info about the address from global lists of address/symbols info
 function GetAddrInfo(Addr: Pointer; out AddrInfo: TMapFileAddrInfo): Boolean; overload;
-// Format addr info into string with all info available
+// Format addr info into string with all info available.
+// Format is:
+//   $Address Unit:LOC [Unit.Routine]
+//     - LOC - if exact, number of line of code; not exact values are marked with ~
 function AddrInfoToString(const AddrInfo: TMapFileAddrInfo): string;
 // Return name of currently executed function/method
 function CurrentFuncName: string;
@@ -69,7 +71,8 @@ function RtlCaptureStackBackTrace(FramesToSkip: ULONG; FramesToCapture: ULONG; B
 {$ENDIF}
 
 {$IFDEF MSWINDOWS}
-procedure GetCallStackOS(var Stack: TDbgInfoStack; FramesToSkip: Integer);
+// Return call stack pointers. Removes itself from call stack by increasing FramesToSkip by 1
+procedure GetCallStackOS(const Stack: TDbgInfoStack; FramesToSkip: Integer);
 {$ENDIF}
 function CallStackToStr(const Stack: TDbgInfoStack): string;
 procedure InstallExceptionCallStack;
@@ -215,32 +218,40 @@ procedure ReadLineNumbersSection(const arr: TStrArray; var CurrIdx: Integer; con
   const SegmentInfo: TMapFileSegmentStartAddrs; var LineAddrs: TArray<TMapFileLineAddrInfo>);
 var
   linearr: TStrArray;
-  s, sAddr, sLineNum: string;
+  s: string;
   lai: TMapFileLineAddrInfo;
   Segment: Integer;
   Addr: Pointer;
+  Reading1stPart: Boolean;
 begin
   Inc(CurrIdx); // empty
   Inc(CurrIdx); // 1st line
   try
     while arr[CurrIdx] <> '' do
     begin
-      // set of "LL.. 000S:AAAAAAAA" pairs separated by 2 or more spaces
+      // set of "LLL 000S:AAAAAAAA" pairs separated by 1 or more spaces
       // LLL - line number
       // S - segment number
       // A - address
-      linearr := Split(arr[CurrIdx], '  ', False);
+      // Elements will be trimmed because separator is single space and allowEmpty = false
+      linearr := Split(arr[CurrIdx], ' ', False);
+      Reading1stPart := True;
       for s in linearr do
-      begin
-        lai := Default(TMapFileLineAddrInfo);
-        lai.UnitName := UnitName;
-        SplitPair(Trim(s), ' ', sLineNum, sAddr);
-        lai.LineNum := StrToInt(sLineNum);
-        ReadAddr(sAddr, Segment, Addr);
-        lai.Addr := AbsAddr(SegmentInfo[Segment], Addr);
-        if lai.Addr <> nil then
-          TArrHelper<TMapFileLineAddrInfo>.Add(LineAddrs, lai);
-      end;
+        if Reading1stPart then
+        begin
+          lai := Default(TMapFileLineAddrInfo);
+          lai.UnitName := UnitName;
+          lai.LineNum := StrToInt(s);
+          Reading1stPart := False;
+        end
+        else
+        begin
+          ReadAddr(s, Segment, Addr);
+          lai.Addr := AbsAddr(SegmentInfo[Segment], Addr);
+          if lai.Addr <> nil then
+            TArrHelper<TMapFileLineAddrInfo>.Add(LineAddrs, lai);
+          Reading1stPart := True;
+        end;
       Inc(CurrIdx);
     end;
   except on E: Exception do
@@ -363,11 +374,12 @@ end;
 
 {$ENDREGION}
 
-procedure GetCallStackOS(var Stack: TDbgInfoStack; FramesToSkip: Integer);
+procedure GetCallStackOS(const Stack: TDbgInfoStack; FramesToSkip: Integer);
 begin
   ZeroMemory(@Stack, SizeOf(Stack));
   {$IFDEF MSWINDOWS}
-  RtlCaptureStackBackTrace(FramesToSkip, Length(Stack), @Stack, nil);
+  // Remove itself from call stack by adding 1
+  RtlCaptureStackBackTrace(1 + FramesToSkip, Length(Stack), @Stack, nil);
   {$ENDIF}
 end;
 
@@ -380,7 +392,7 @@ begin
   for Ptr in Stack do
     if Ptr <> nil then
       if MapFileAvailable and GetAddrInfo(Ptr, AddrInfo) then
-        AddStr(Result, AddrInfoToString(AddrInfo), NL)
+        AddStr(Result, Format('$%p', [Ptr]) + ' ' + AddrInfoToString(AddrInfo), NL)
       else
         AddStr(Result, Format('$%p', [Ptr]), NL)
     else
@@ -388,13 +400,21 @@ begin
 end;
 
 function GetExceptionStackInfo(P: PExceptionRecord): Pointer;
+var
+  pStack: PDbgInfoStack;
+  CurrIdx: Integer;
 begin
-  Result := AllocMem(SizeOf(TDbgInfoStack));
-  // ! Excluding nested functions:
-  //  - GetCallStackOS
-  //  - GetExceptionStackInfo
-  //  - System.SysUtils.Exception.RaisingException
-  GetCallStackOS(PDbgInfoStack(Result)^, 3);
+  pStack := AllocMem(SizeOf(TDbgInfoStack));
+  // ! This call stack could include nested functions:
+  //    - GetExceptionStackInfo
+  //    - System.SysUtils.Exception.RaisingException
+  // or could not. Let them be for now.
+  GetCallStackOS(pStack^, 0);
+  // Shift the stack by one and add the address of the exception itself
+  for CurrIdx := High(pStack^) downto Low(pStack^) + 1 do
+    pStack[CurrIdx] := pStack[CurrIdx - 1];
+  pStack[0] := P.ExceptionAddress;
+  Result := pStack;
 end;
 
 function GetStackInfoStringProc(Info: Pointer): string;

@@ -27,12 +27,16 @@ end;
 
 var
   sl: TStringList;
+  ai: TMapFileAddrInfo;
 begin
   InstallExceptionCallStack;
   sl := TStringList.Create;
   sl.LoadFromFile(ChangeFileExt(ParamStr(0), '.map'), TEncoding.UTF8);
   ReadMapFile(sl.Text);
   sl.Free;
+  GetAddrInfo(@Nested2, ai);
+  Writeln(AddrInfoToString(ai));
+  Readln;
   try
     Nested0;
   except on E: Exception do
