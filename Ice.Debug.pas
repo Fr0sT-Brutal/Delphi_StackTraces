@@ -3,7 +3,7 @@
   Compatibility:
     Compiler: D2010+, FPC
     Platform: x86, x64
-    ОС: Windows
+    OS: Windows
   (c) Fr0sT-Brutal https://github.com/Fr0sT-Brutal
   LICENSE MPL-2.0
 *******************************************************)
@@ -19,20 +19,20 @@ uses {$IFDEF MSWINDOWS}
      Ice.Utils;
 
 type
-  // ***************************************************************************
-  // MAP file reading
-  // ***************************************************************************
+  // Line numbers info: unit, number, address. This is loaded from MAP file
   TMapFileLineAddrInfo = record
     UnitName: string;
     LineNum: Integer;
     Addr: Pointer;
   end;
 
+  // Public (procedures, methods) info: name, address. This is loaded from MAP file
   TMapFilePublicAddrInfo = record
     Name: string;
     Addr: Pointer;
   end;
 
+  // Info about an address returned by GetAddrInfo: unit, line number, public name, flag of exact match
   TMapFileAddrInfo = record
     UnitName: string;
     LineNum: Integer;
@@ -41,14 +41,20 @@ type
   end;
 
 // Read MAP file from string and fill given lists of address/symbols info
+//   @param MapFile - contents of MAP file
+// @raises Exception on error
 procedure ReadMapFile(const MapFile: string; out LineAddrs: TArray<TMapFileLineAddrInfo>;
   out PublicAddrs: TArray<TMapFilePublicAddrInfo>); overload;
 // Read MAP file from string and fill global lists of address/symbols info
+//   @param MapFile - contents of MAP file
+// @raises Exception on error
 procedure ReadMapFile(const MapFile: string); overload;
-// Return info about the address from given lists of address/symbols info
+// Return info about the address from given lists of address/symbols info.
+// @returns Whether info was found
 function GetAddrInfo(Addr: Pointer; const LineAddrs: TArray<TMapFileLineAddrInfo>;
   const PublicAddrs: TArray<TMapFilePublicAddrInfo>; out AddrInfo: TMapFileAddrInfo): Boolean; overload;
 // Return info about the address from global lists of address/symbols info
+// @returns Whether info was found
 function GetAddrInfo(Addr: Pointer; out AddrInfo: TMapFileAddrInfo): Boolean; overload;
 // Format addr info into string with all info available.
 // Format is:
@@ -74,8 +80,11 @@ function RtlCaptureStackBackTrace(FramesToSkip: ULONG; FramesToCapture: ULONG; B
 // Return call stack pointers. Removes itself from call stack by increasing FramesToSkip by 1
 procedure GetCallStackOS(const Stack: TDbgInfoStack; FramesToSkip: Integer);
 {$ENDIF}
+// Format callstack to string using AddrInfoToString
 function CallStackToStr(const Stack: TDbgInfoStack): string;
+// Setup custom exception call stack hooks
 procedure InstallExceptionCallStack;
+// Remove custom exception call stack hooks
 procedure UninstallExceptionCallStack;
 
 implementation
@@ -85,28 +94,64 @@ var
   LineAddrs: TArray<TMapFileLineAddrInfo>;
   PublicAddrs: TArray<TMapFilePublicAddrInfo>;
 
-const
+resourcestring
+  S_EMF_ReadingNoSection = 'Error reading map file: no section "%s" found';
   S_EMF_Reading = 'Error reading map file: "%s" at line #%d "%s"';
+  S_EMF_ReadingUnexpContents = 'unexpected contents';
+  S_EMF_ReadAddr = 'String "%s" doesn''t contain valid address (expect HHHH:HHHHHHHH)';
+  S_EMF_ReadAddrIdx = 'String "%s" starting from index %d doesn''t contain valid address (expect HHHH:HHHHHHHH)';
 
 {$REGION 'MAP file'}
+
+//~ ** Internals **
 
 const
   SSegmentsHeader = ' Start         Length     Name                   Class';
   SPublicsHeader = '  Address             Publics by Name';
   SLineNumbersHeaderStart = 'Line numbers for ';
   MaxSegments = 10; // there could unlikely be more segments in EXE
+  // Address format: HHHH:HHHHHHHH where HHHH is hex number of segment, HHHHHHHH
+  // is hex offset inside that segment
+  AddrSegmLen = 4;
+  AddrOfsLen = 8;
+  AddrSep: Char = ':';
+  AddrLen = AddrSegmLen + 1 + AddrOfsLen;
 
 type
   TMapFileSegmentStartAddrs = array[1..MaxSegments] of Pointer; // segment number => starting address
 
-// Read address of a "0002:0001FDEF" kind
-procedure ReadAddr(const StrAddr: string; out Segment: Integer; out Addr: Pointer);
+// Read address of a "0002:0001FDEF" kind from string starting at index
+//   StartIdx - [IN] Index to start at, [OUT] Index rigth after the address
+// @raises Exception if address is invalid
+procedure ReadAddr(const S: string; var StartIdx: Integer; out Segment: Integer; out Addr: Pointer); overload;
+var
+  ErrIdx: Integer;
 begin
-  with SplitPair(StrAddr, ':') do
-  begin
-    Segment := StrToInt(Left);
-    Addr := Pointer(StrToInt('$'+Right));
-  end;
+  if Length(S) < StartIdx - 1 + AddrLen then
+    raise Err(S_EMF_ReadAddrIdx, [S, StartIdx]);
+  Segment := HexToUInt(PChar(Pointer(S)) + StartIdx - 1, AddrSegmLen, ErrIdx);
+  if ErrIdx <> 0 then
+    raise Err(S_EMF_ReadAddrIdx, [S, StartIdx]);
+  if S[StartIdx - 1 + AddrSegmLen + 1] <> AddrSep then
+    raise Err(S_EMF_ReadAddrIdx, [S, StartIdx]);
+  Addr := Pointer(HexToUInt(PChar(Pointer(S)) + StartIdx - 1 + AddrSegmLen + 1, AddrOfsLen, ErrIdx));
+  if ErrIdx <> 0 then
+    raise Err(S_EMF_ReadAddrIdx, [S, StartIdx]);
+  Inc(StartIdx, AddrLen);
+end;
+
+// Skip spaces in string starting from an index, return whether a non-space char
+// was found (False is the string has ended by space). Idx is allowed to be greater
+// than string length
+function SkipSpaces(const S: string; Len: Integer; var Idx: Integer): Boolean;
+begin
+  repeat
+    if Idx >= Len then
+      Exit(False);
+    if S[Idx] <> ' ' then
+      Exit(True);
+    Inc(Idx);
+  until False;
 end;
 
 // Restore full absolute address from segment address and relative address.
@@ -121,25 +166,64 @@ begin
   Result := Pointer(uRes);
 end;
 
+// Loops through array of strings starting from an index until a string to search is found
+// @returns Whether search string is found and is not the last element in array
+function LocateSection(const arr: TStrArray; var CurrIdx: Integer; const SectionHeader: string): Boolean;
+var HighArr: Integer;
+begin
+  HighArr := High(arr);
+  while CurrIdx < HighArr do // we want at least one line after stopline
+  begin
+    if arr[CurrIdx] = SectionHeader then
+    begin
+      Inc(CurrIdx); // Move to next line after stopline
+      Exit(True);
+    end;
+    Inc(CurrIdx);
+  end;
+  Result := False;
+end;
+
+// Loops through array of strings starting from an index until a string to search is found
+// @returns Whether search string is found and is not the last element in array
+function LocateSectionPartial(const arr: TStrArray; var CurrIdx: Integer; const SectionHeader: string): Boolean;
+var HighArr: Integer;
+begin
+  HighArr := High(arr);
+  while CurrIdx < HighArr do // we want at least one line after stopline
+  begin
+    if FirstChar(arr[CurrIdx]) = SectionHeader[1] then  // fast check
+      if StrIsStartingFrom(arr[CurrIdx], SectionHeader) then
+      begin
+        Inc(CurrIdx); // Move to next line after stopline
+        Exit(True);
+      end;
+    Inc(CurrIdx);
+  end;
+  Result := False;
+end;
+
 // Read starting addrs of segments
+// @raises Exception section is not found or some line is invalid
 procedure ReadSegments(const arr: TStrArray; var CurrIdx: Integer; var SegmentInfo: TMapFileSegmentStartAddrs);
 var
-  s: string;
-  Segment: Integer;
+  Line: string;
+  Segment, LineIdx, HighArr: Integer;
   Addr: Pointer;
 begin
-  while arr[CurrIdx] <> SSegmentsHeader do
-  begin
-    Inc(CurrIdx);
-    if CurrIdx = High(arr) then Exit;
-  end;
-  Inc(CurrIdx);
-  // " 0001:00401000 002AF040H .text                   CODE"
+  if not LocateSection(arr, CurrIdx, SSegmentsHeader) then
+    raise Err(S_EMF_ReadingNoSection, [SSegmentsHeader]);
+  // Read all lines until empty
   try
-    while arr[CurrIdx] <> '' do
+    HighArr := High(arr);
+    // " 0001:00401000 002AF040H .text                   CODE"
+    while CurrIdx <= HighArr do
     begin
-      s := GetElement(arr[CurrIdx], 1, ' ');
-      ReadAddr(s, Segment, Addr);
+      Line := arr[CurrIdx];
+      if Line = '' then Break;
+      LineIdx := 1;
+      SkipSpaces(Line, Length(Line), LineIdx);
+      ReadAddr(Line, LineIdx, Segment, Addr);
       SegmentInfo[Segment] := Addr;
       Inc(CurrIdx);
     end;
@@ -149,32 +233,36 @@ begin
 end;
 
 // Read starting addrs of publics
+// @raises Exception section is not found or some line is invalid
 procedure ReadPublics(const arr: TStrArray; var CurrIdx: Integer;
   const SegmentInfo: TMapFileSegmentStartAddrs; var PublicAddrs: TArray<TMapFilePublicAddrInfo>);
 var
-  sAddr, sPub: string;
-  Segment: Integer;
+  Line: string;
+  Segment, LineIdx, HighArr: Integer;
   Addr: Pointer;
   pai: TMapFilePublicAddrInfo;
 begin
-  while arr[CurrIdx] <> SPublicsHeader do
-  begin
-    Inc(CurrIdx);
-    if CurrIdx = High(arr) then Exit;
-  end;
-  Inc(CurrIdx);
-  Inc(CurrIdx);
-  // " 0001:0028BC18       <Unit>.<PublicName>"
+  if not LocateSection(arr, CurrIdx, SPublicsHeader) then
+    raise Err(S_EMF_ReadingNoSection, [SPublicsHeader]);
+  Inc(CurrIdx); // empty line
+  // Read all lines until empty
   try
-    while arr[CurrIdx] <> '' do
+    HighArr := High(arr);
+    // " 0001:0028BC18       <Unit>.<PublicName>"
+    while CurrIdx <= HighArr do
     begin
-      SplitPair(arr[CurrIdx], '       ', sAddr, sPub);
+      Line := arr[CurrIdx];
+      if Line = '' then Break;
+      LineIdx := 1;
+      SkipSpaces(Line, Length(Line), LineIdx);
+      ReadAddr(Line, LineIdx, Segment, Addr);
       pai := Default(TMapFilePublicAddrInfo);
-      ReadAddr(Trim(sAddr), Segment, Addr);
       pai.Addr := AbsAddr(SegmentInfo[Segment], Addr);
       if pai.Addr <> nil then
       begin
-        pai.Name := sPub;
+        if not SkipSpaces(Line, Length(Line), LineIdx) then
+          raise Err(S_EMF_ReadingUnexpContents);
+        pai.Name := Copy(Line, LineIdx, MaxInt);
         TArrHelper<TMapFilePublicAddrInfo>.Add(PublicAddrs, pai);
       end;
       Inc(CurrIdx);
@@ -184,74 +272,69 @@ begin
   end;
 end;
 
-// Loop until line numbers for a unit is encountered
-function LocateLineNumbersSection(const arr: TStrArray; var CurrIdx: Integer): Boolean;
-begin
-  Result := False;
-  repeat
-    if FirstChar(arr[CurrIdx]) = SLineNumbersHeaderStart[1] then
-      if StrIsStartingFrom(arr[CurrIdx], SLineNumbersHeaderStart) then
-        Exit(True);
-    Inc(CurrIdx);
-    if CurrIdx = High(arr) then
-      Exit;
-  until False;
-end;
-
+// Read header of unit line numbers section, move to next line.
 // "Line numbers for <Unit1>(<Unit2>.pas) segment <segm>"
 // <Unit1> could be the same as <Unit2> or differ in case of generics
-procedure ReadLineNumbersHeader(const Header: string; out UnitName: string);
+procedure ReadLineNumbersHeader(const arr: TStrArray; var CurrIdx: Integer; out UnitName: string);
+const
+  HeaderPrefixLen = Length(SLineNumbersHeaderStart);
 var
-  s, Unit1st, Unit2nd: string;
+  SpPos: Integer;
+  UnitParts: TStrArray;
 begin
-  s := Header;
-  Delete(s, 1, Length(SLineNumbersHeaderStart));  // "<Unit1>(<Unit2>.pas) segment <segm>"
-  UnitName := GetElement(s, 0, ' ');              // "<Unit1>(<Unit2>.pas)"
-  // Check if unit is the same
-  SplitPair(UnitName, '(', Unit1st, Unit2nd);
-  if StrIsStartingFrom(Unit2nd, Unit1st) then
-    UnitName := Copy(Unit2nd, 1, Length(Unit2nd) - 1);  // get rid of trailing ')'
+  SpPos := Pos(' ', arr[CurrIdx], HeaderPrefixLen + 1);
+  if SpPos = 0 then
+    raise Err(S_EMF_Reading, [S_EMF_ReadingUnexpContents, CurrIdx + 1, arr[CurrIdx]]);
+  UnitName := Copy(arr[CurrIdx], HeaderPrefixLen + 1, SpPos - HeaderPrefixLen - 1);  // "<Unit1>(<Unit2>.pas)"
+  // Check if <Unit1> = <Unit2> and shrink it then
+  UnitParts := Split(UnitName, '(');
+  if StrIsStartingFrom(UnitParts[1], UnitParts[0]) then
+    UnitName := Copy(UnitParts[1], 1, Length(UnitParts[1]) - 1);  // get rid of trailing ')';
+  Inc(CurrIdx);
 end;
 
 // Read line numbers section and fill LineAddrs
 procedure ReadLineNumbersSection(const arr: TStrArray; var CurrIdx: Integer; const UnitName: string;
   const SegmentInfo: TMapFileSegmentStartAddrs; var LineAddrs: TArray<TMapFileLineAddrInfo>);
 var
-  linearr: TStrArray;
-  s: string;
+  Line: string;
   lai: TMapFileLineAddrInfo;
-  Segment: Integer;
+  Segment, LineIdx, LineLen, HighArr: Integer;
   Addr: Pointer;
-  Reading1stPart: Boolean;
 begin
-  Inc(CurrIdx); // empty
-  Inc(CurrIdx); // 1st line
+  // Read all lines until empty
   try
-    while arr[CurrIdx] <> '' do
+    HighArr := High(arr);
+    while CurrIdx <= HighArr do
     begin
-      // set of "LLL 000S:AAAAAAAA" pairs separated by 1 or more spaces
-      // LLL - line number
-      // S - segment number
-      // A - address
-      // Elements will be trimmed because separator is single space and allowEmpty = false
-      linearr := Split(arr[CurrIdx], ' ', False);
-      Reading1stPart := True;
-      for s in linearr do
-        if Reading1stPart then
-        begin
-          lai := Default(TMapFileLineAddrInfo);
-          lai.UnitName := UnitName;
-          lai.LineNum := StrToInt(s);
-          Reading1stPart := False;
-        end
-        else
-        begin
-          ReadAddr(s, Segment, Addr);
-          lai.Addr := AbsAddr(SegmentInfo[Segment], Addr);
-          if lai.Addr <> nil then
-            TArrHelper<TMapFileLineAddrInfo>.Add(LineAddrs, lai);
-          Reading1stPart := True;
-        end;
+      Line := arr[CurrIdx];
+      if Line = '' then Break;
+      // set of "  L 000S:AAAAAAAA" pairs separated by 1 or more spaces
+      // L(LL...) - line number
+      // 000S - segment number
+      // AAAAAAAA - address
+      LineLen := Length(Line);
+      LineIdx := 1;
+
+      repeat
+        if not SkipSpaces(Line, LineLen, LineIdx) then Break; // line has ended
+        // Read line number
+        lai := Default(TMapFileLineAddrInfo);
+        lai.UnitName := UnitName;
+        lai.LineNum := ReadNumber(Line, LineIdx);  // reads until non-digit char
+        if lai.LineNum = 0 then
+          raise Err(S_EMF_ReadingUnexpContents);
+        // Check delimiting space
+        if Line[LineIdx] <> ' ' then
+          raise Err(S_EMF_ReadingUnexpContents);
+        Inc(LineIdx);
+        // Read address
+        ReadAddr(Line, LineIdx, Segment, Addr);
+        lai.Addr := AbsAddr(SegmentInfo[Segment], Addr);
+        if lai.Addr <> nil then
+          TArrHelper<TMapFileLineAddrInfo>.Add(LineAddrs, lai);
+      until False;
+
       Inc(CurrIdx);
     end;
   except on E: Exception do
@@ -259,11 +342,13 @@ begin
   end;
 end;
 
+//~ ** Publics **
+
 procedure ReadMapFile(const MapFile: string; out LineAddrs: TArray<TMapFileLineAddrInfo>;
   out PublicAddrs: TArray<TMapFilePublicAddrInfo>);
 var
   arr: TStrArray;
-  i: Integer;
+  CurrIdx, HighArr: Integer;
   UnitName: string;
   SegmentInfo: TMapFileSegmentStartAddrs;
 begin
@@ -271,17 +356,21 @@ begin
   PublicAddrs := nil;
 
   arr := Split(MapFile, NL);
-  i := Low(arr);
+  CurrIdx := Low(arr);
 
-  ReadSegments(arr, i, SegmentInfo);
-  ReadPublics(arr, i, SegmentInfo, PublicAddrs);
+  ReadSegments(arr, CurrIdx, SegmentInfo);
+  ReadPublics(arr, CurrIdx, SegmentInfo, PublicAddrs);
 
+  HighArr := High(arr);
   repeat
-    if not LocateLineNumbersSection(arr, i) then
+    // Here we read obligatory sections so don't raise exception if not found
+    if not LocateSectionPartial(arr, CurrIdx, SLineNumbersHeaderStart) then
       Break;
-    ReadLineNumbersHeader(arr[i], UnitName);
-    ReadLineNumbersSection(arr, i, UnitName, SegmentInfo, LineAddrs);
-  until i = High(arr);
+    Dec(CurrIdx); // We'll need section header
+    ReadLineNumbersHeader(arr, CurrIdx, UnitName);
+    Inc(CurrIdx); // skip empty line
+    ReadLineNumbersSection(arr, CurrIdx, UnitName, SegmentInfo, LineAddrs);
+  until CurrIdx = HighArr;
 
   TArrHelper<TMapFileLineAddrInfo>.Sort(LineAddrs,
     function(const Item1, Item2: TMapFileLineAddrInfo): TCompareRes
@@ -358,9 +447,11 @@ const
   SPattPub = ' [%s]';
   Patterns: array[Boolean] of string =
     (SPattMain, SPattMain + SPattPub);
+  ExactMarks:array[Boolean] of string =
+    ('~', '');
 begin
   Result := Format(Patterns[AddrInfo.PublicName <> ''],
-    [AddrInfo.UnitName, IfTh(not AddrInfo.Exact, '~'), AddrInfo.LineNum,
+    [AddrInfo.UnitName, ExactMarks[AddrInfo.Exact], AddrInfo.LineNum,
      AddrInfo.PublicName]);
 end;
 
