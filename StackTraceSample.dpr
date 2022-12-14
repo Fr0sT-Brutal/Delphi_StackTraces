@@ -37,9 +37,27 @@ begin
   Nested1_1;
 end;
 
+// Demo class
+type
+  {$IFOPT M-} {$DEFINE NO_TYPEINFO} {$ENDIF} // Save current value of TYPEINFO option
+  {$M+} // ! Necessary for GetMethodName to work
+  TDemoClass = class
+    procedure TestMethod;
+  end;
+  {$IFDEF NO_TYPEINFO} {$M-} {$ENDIF}        // Revert value of TYPEINFO option
+
+{ TDemoClass }
+
+procedure TDemoClass.TestMethod;
+begin
+  Writeln('** Get method name by address', NL, GetMethodName(Self, GetCurrentAddress));
+end;
+
 var
   sl: TStringList;
   ai: TMapFileAddrInfo;
+  cl: TDemoClass;
+
 begin
   // Setup our custom exception call stack mechanism
   InstallExceptionCallStack;
@@ -68,6 +86,11 @@ begin
 
   // Remove our custom exception call stack mechanism
   UninstallExceptionCallStack;
+
+  // Demo4: get method name by address
+  cl := TDemoClass.Create();
+  cl.TestMethod;
+  cl.Free;
 
   Readln;
 end.
