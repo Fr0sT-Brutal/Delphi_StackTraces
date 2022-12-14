@@ -20,8 +20,7 @@ interface
 {$IFEND}
 
 uses
-  {$IFDEF MSWINDOWS} Windows, {$ENDIF}
-  TypInfo, SysUtils, Types;
+  SysUtils;
 
 // Comparation results - not a copy from System.Types b/c there's mysterious bug
 // when using in TRecordList<T>.Sort
@@ -35,10 +34,6 @@ const
 
 type
   TStrArray = TArray<string>;
-
-  TStrPair = record
-    Left, Right: string;
-  end;
 
   // For lists and arrays
   TCompareFn<T> = reference to function(Item1, Item2: T): TCompareRes;
@@ -95,44 +90,29 @@ type
   end;
 
 const
-  // Used in Split, Join, GetElement
-  DefListDelim = ';';
-
-  NLWin = #13#10;
-  NLNix = #10;
-  NLMac = #13;
-
   // Platform-dependent end of line
-  NL = {$IFDEF POSIX}     NLNix {$ENDIF}
-       {$IFDEF MSWINDOWS} NLWin {$ENDIF};
+  NL = sLineBreak;
 
-  function IfTh(Value: Boolean; const ATrue: string; const AFalse: string = ''): string; overload; inline;
   // comparation
-  function Compare(Item1, Item2: Pointer): TCompareRes; overload; inline;
+  function Compare(Item1, Item2: Pointer): TCompareRes; inline;
+  // Read decimal number from the string starting from Idx up to first non-digit char
+  function ReadNumber(const Str: string; var Idx: Integer): Integer;
+  // Read DigitCnt hex digits from Src into a number
+  function HexToUInt(Src: PChar; DigitCnt: Cardinal; out ErrIdx: Integer): NativeUInt;
   // Get 1st char of string or #0 if it's empty
   function FirstChar(const Str: string): Char; inline;
   {$IFNDEF CAPS_POS_WITH_OFFSET} // System.Pos with offset starting from XE3
   function Pos(const SubStr, Str: string; Offset: Integer): Integer; overload;
   {$ENDIF}
   // Check if Str starts from SubStr without copying by direct memory comparison
-  function StrIsStartingFrom(const Str, SubStr: string): Boolean; overload;
+  function StrIsStartingFrom(const Str, SubStr: string): Boolean;
   // Add substring to string with delimiter.
   procedure AddStr(var Str: string; const AddStr, Delim: string; AllowEmpty: Boolean = True); inline;
   // Split string to array of elements.
-  function Split(const Str: string; const Delim: string = DefListDelim; AllowEmpty: Boolean = True;
+  function Split(const Str: string; const Delim: string; AllowEmpty: Boolean = True;
     LastIdx: Integer = MaxInt): TStrArray;
-  // Get 0-based element from string with delimiters
-  function GetElement(const Str: string; ElemIdx: Integer; const Delim: string = DefListDelim;
-    LastIdx: Integer = MaxInt): string;
-  // Break a string into two parts by delimiter. If no delimiter found, Right will be empty.
-  procedure SplitPair(const Str: string; const Delim: string; out Left, Right: string); overload;
-  // Break a string - as a function
-  function SplitPair(const Str: string; const Delim: string = DefListDelim): TStrPair; overload; inline;
-  // Join all strings in array into one with delimiters (opposite to Split)
-  function Join(const Arr: array of string; const Delim: string = DefListDelim; AllowEmpty: Boolean = True;
-    const Prefix: string = ''; const Postfix: string = ''): string;
   // Get size of string in bytes
-  function StrSize(const Str: UnicodeString): Int64; overload; inline;
+  function StrSize(const Str: UnicodeString): Int64; inline;
   // Fill buffer with zero's. Differs from ZeroMemory: inline and other param types
   procedure ZeroMem(var Dest; Count: NativeUInt); inline;
   // Return exception info: message, class and address.
@@ -141,27 +121,28 @@ const
   function Err(const Msg: string): Exception; overload;
   // Create exception to raise - just a short form (formatting included)
   function Err(const Msg: string; const Vars: array of const): Exception; overload;
-  {$IFDEF MSWINDOWS}
-  // Print message to Windows debug log (OutputDebugString wrapper)
-  procedure Debug(const Msg: string);
-  {$ENDIF}
   // Get address of currently executed code
   function GetCurrentAddress: Pointer;
-  // Get name of class method that contains the given address
+  // Get name of class method that contains the given address.
+  // Class must be compiled with M+/TYPEINFO ON option!
   function GetMethodName(AClass: TClass; Address: Pointer): string; overload;
-  // Get name of object's method that contains the given address
+  // Get name of object's method that contains the given address.
+  // Class must be compiled with M+/TYPEINFO ON option!
   function GetMethodName(AObject: TObject; Address: Pointer): string; overload;
 
 implementation
 
 const
   // Messages
-  S_E_OSError              = 'Error in system function "%s": %d %s';
-  S_E_OSErrorMsg           = 'Error in system function "%s": %d %s [%s]';
   S_E_NoExceptInfo         = 'No exception data or error occurred';
   S_M_ExceptInfoPatt       = '%s (%s @ $%x)';
   S_M_ExceptInfoStackPatt  = 'Stack trace:';
   S_M_ExceptInfoBaseExc    = 'Base exception: %s';
+  S_EHex_TooMuchDigits     = 'HexToUInt: number of digits %d exceeds limit (16)';
+  S_EHex_UnsuppCharSize    = 'Hex: char size  %d is not supported';
+
+const
+  Digits = ['0'..'9'];
 
 {$REGION 'TArrHelper'}
 
@@ -329,13 +310,6 @@ begin
     Result := ValEqual;
 end;
 
-// ********* Poor man's ternary operator ********* \\
-
-function IfTh(Value: Boolean; const ATrue: string; const AFalse: string): string;
-begin
-  if Value then Result := ATrue else Result := AFalse;
-end;
-
 // ********* Strings ********* \\
 
 {$IFNDEF CAPS_POS_WITH_OFFSET}
@@ -388,6 +362,103 @@ begin
   Result := 0;
 end;
 {$ENDIF}
+
+// Digit char to digit
+function CharToDigit(C: Char): Byte;
+begin
+  Result := Ord(C) - Ord('0');
+end;
+
+// Read a number from string starting from index Idx. Reading ends at first non-digit char.
+// Index of that char is returned in Idx.
+function ReadNumber(const Str: string; var Idx: Integer): Integer;
+var Len: Integer;
+begin
+  Result := 0; Len := Length(Str);
+  while (Idx <= Len) and (CharInSet(Str[Idx], Digits)) do
+  begin
+    Result := Result*10 + CharToDigit(Str[Idx]);
+    Inc(Idx);
+  end;
+end;
+
+// ********* Hex ********* \\
+
+const
+  HexDigitValues: array['0'..'f'] of ShortInt =
+  (
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,                               // 0..9
+    -1, -1, -1, -1, -1, -1, -1,                                 // :..@
+    10, 11, 12, 13, 14, 15,                                     // A..F
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, // G..`
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    10, 11, 12, 13, 14, 15                                      // a..f
+  );
+
+  HexDigits: array[0..15] of Char =
+    '0123456789ABCDEF';
+
+function HexDigitToInt(Digit: Char): ShortInt; inline;
+begin
+  case Digit of
+    Low(HexDigitValues)..High(HexDigitValues):
+      Result := HexDigitValues[Digit];
+    else
+      Result := -1;
+  end;
+end;
+
+// Convert characters from hex string to a number.
+//   Src - pointer to hex string without spaces, accepted chars are 0..9, a..f, A..F
+//   DigitCnt - how much hex digits to read
+//   ErrIdx - index of first char that is not hex digit (0 on success)
+function InternalHexToUInt(Src: Pointer; CharSize: Byte; DigitCnt: Byte; out ErrIdx: Integer): NativeUInt; inline;
+var
+  i: Cardinal;
+  Digit: ShortInt;
+begin
+  if DigitCnt > 2*SizeOf(NativeUInt) then
+    raise Err(S_EHex_TooMuchDigits, [DigitCnt]);
+
+  ErrIdx := 0; Result := 0; // !! 0 because it will be shifted
+
+  case CharSize of
+    {$IFDEF UNICODE}
+    SizeOf(AnsiChar):
+      for i := 1 to DigitCnt do
+      begin
+        Result := Result shl 4; // ! doesn't matter at 1st loop as the value is 0
+        Digit := HexDigitToInt(Char(PAnsiChar(Src)^));
+        if Digit = -1 then
+        begin
+          ErrIdx := i;
+          Exit(0);
+        end;
+        Result := Result or Byte(Digit);
+        Inc(PByte(Src), CharSize);
+      end;
+    {$ENDIF}
+    SizeOf(Char):
+      for i := 1 to DigitCnt do
+      begin
+        Result := Result shl 4; // ! doesn't matter at 1st loop as the value is 0
+        Digit := HexDigitToInt(Char(PWideChar(Src)^));
+        if Digit = -1 then
+        begin
+          ErrIdx := i;
+          Exit(0);
+        end;
+        Result := Result or Byte(Digit);
+        Inc(PByte(Src), CharSize);
+      end;
+    else raise Err(S_EHex_UnsuppCharSize, [CharSize]);
+  end;
+end;
+
+function HexToUInt(Src: PChar; DigitCnt: Cardinal; out ErrIdx: Integer): NativeUInt;
+begin
+  Result := InternalHexToUInt(Src, SizeOf(Char), DigitCnt, ErrIdx);
+end;
 
 // Add substring to string with delimiter.
 //   @param Str - accumulator string
@@ -449,111 +520,6 @@ begin
   until NextDelim > StrLen;
 
   SetLength(Result, CurrIdx); // cut the array down
-end;
-
-// Get 0-based element from string with delimiters
-//   @param Str - source string
-//   @param ElemIdx - 0-based element index
-//   @param Delim - elements delimiter inside string (any length and contents)
-//   @param LastIdx - last index at which splitting will stop; starting from this
-//     index all the remaining tail of string will go to the last item.
-//     If ElemIdx = LastIdx, function returns all tail of string.
-//     If ElemIdx > LastIdx, function returns empty string.
-//       GetElement('list;"item1;item2"', 1, ';', 1) = '"item1;item2"'
-//       GetElement('list;"item1;item2"', 2, ';', 1) = ''
-//       GetElement('i1;i2', 0, ';', 0) = 'i1;i2'
-//     LastIdx = MaxInt - this check is disabled
-// Example:
-//   value := GetElement('GeneralSettings.SomeIniOption = 123', 1, ' = ');
-function GetElement(const Str: string; ElemIdx: Integer; const Delim: string; LastIdx: Integer): string;
-var CurrDelim, NextDelim, Idx: Integer;
-begin
-  Result := ''; CurrDelim := 1;
-
-  // requesting Index greater than last one - return empty string immediately
-  if ElemIdx > LastIdx then Exit;
-
-  // ElemIdx times search for delim in string
-  for Idx := 1 to ElemIdx do
-  begin
-    CurrDelim := Pos(Delim, Str, CurrDelim);
-    if CurrDelim = 0 then Exit;
-    Inc(CurrDelim, Length(Delim)); // now here's index of the 1st char of next element
-    // limits of LastIdx exceeded - return empty string
-    if Idx > LastIdx then Exit;
-  end;
-
-  // LastIdx equals to ElemIdx - copy all tail, otherwise search for end delim
-  if LastIdx = ElemIdx then
-    Result := Copy(Str, CurrDelim, MaxInt)
-  else
-  begin
-    NextDelim := Pos(Delim, Str, CurrDelim);
-    // not found - take all to the end
-    if NextDelim = 0 then
-      NextDelim := Length(Str) + 1;
-    Result := Copy(Str, CurrDelim, NextDelim-CurrDelim);
-  end;
-end;
-
-procedure SplitPair(const Str: string; const Delim: string; out Left, Right: string);
-var DelimPos: Integer;
-begin
-  DelimPos := Pos(Delim, Str);
-  if DelimPos <> 0 then
-  begin
-    Left := Copy(Str, 1, DelimPos - 1);
-    Right := Copy(Str, DelimPos + Length(Delim), MaxInt);
-  end
-  else // no delimiter - only Left specified; handle this case separately to use COW of strings
-  begin
-    Left := Str;
-    Right := '';
-  end;
-end;
-
-function SplitPair(const Str: string; const Delim: string): TStrPair;
-begin
-  SplitPair(Str, Delim, Result.Left, Result.Right);
-end;
-
-// Join all strings in array into one with delimiters (opposite to Split)
-//   @param Arr - array of strings
-//   @param Delim - delimiter of elements in resulting string (any string incl. empty)
-//   @param AllowEmpty - allow/skip empty elements. Required if resulting string must
-//     contain fixed number of elements.
-//   @param Prefix - fragment to add before any added element
-//   @param Postfix - fragment to add after any added element (differs from Delim in
-//     that it is added after last element as well)
-// Examples:
-//   FruitList := Join(['apples', 'bananas', 'grape'], '; ')
-//   BananaProperties := Join([Banana.Name, Banana.Color, '', Banana.Country], ';', True)
-//   ReJoin := Join(Split('one;two;three'), '|');
-//   FormatList := Join(['apples', 'bananas', 'grape'], NL, False, '* ')
-//   QuotedList := Join(['apples', 'bananas', 'grape'], NL, False, '* "', '"')
-function Join(const Arr: array of string; const Delim: string; AllowEmpty: Boolean;
-  const Prefix, Postfix: string): string;
-var
-  i: Integer;
-  WasAdd: Boolean;
-begin
-  Result := ''; WasAdd := False;
-
-  for i := Low(Arr) to High(Arr) do
-  begin
-    if (Arr[i] = '') and not AllowEmpty then Continue;
-
-    // Usual "Result <> ''" won't work if 1st element is empty - that is possible
-    // if AllowEmpty = True.
-
-    if WasAdd then
-      Result := Result + Delim + Prefix + Arr[i] + Postfix
-    else
-    begin
-      Result := Prefix + Arr[i] + Postfix;
-      WasAdd := True;
-    end;
-  end;
 end;
 
 function StrSize(const Str: UnicodeString): Int64;
@@ -624,13 +590,6 @@ begin
   if E <> E.BaseException then
     AddStr(Result, Format(S_M_ExceptInfoBaseExc, [ExceptionInfo(E.BaseException)]), Separator[CallStacks]);
 end;
-
-{$IFDEF MSWINDOWS}
-procedure Debug(const Msg: string);
-begin
-  OutputDebugString(PChar(Msg));
-end;
-{$ENDIF}
 
 function Err(const Msg: string): Exception;
 begin
