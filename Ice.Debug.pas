@@ -63,6 +63,8 @@ function GetAddrInfo(Addr: Pointer; out AddrInfo: TMapFileAddrInfo): Boolean; ov
 function AddrInfoToString(const AddrInfo: TMapFileAddrInfo): string;
 // Return name of currently executed function/method
 function CurrentFuncName: string;
+// Return flag whether MAP file has been loaded to global variables
+function MapFileLoaded: Boolean;
 
 // Call stack
 const
@@ -464,6 +466,11 @@ begin
 end;
 
 {$ENDREGION}
+
+function MapFileLoaded: Boolean;
+begin
+  Exit(MapFileAvailable);
+end;
 
 procedure GetCallStackOS(const Stack: TDbgInfoStack; FramesToSkip: Integer);
 begin

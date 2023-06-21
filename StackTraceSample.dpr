@@ -5,7 +5,7 @@ program StackTraceSample;
 {$R *.res}
 
 uses
-  System.SysUtils, Classes,
+  System.SysUtils, Classes, Zlib, Windows,
   Ice.Utils, Ice.Debug;
 
 // Demo subs
@@ -53,20 +53,66 @@ begin
   Writeln('** Get method name by address', NL, GetMethodName(Self, GetCurrentAddress));
 end;
 
+// Load MAP file from <exename>.map or, if not exists, from RT_RCDATA 'MapFileZ' resource (compressed)
+// Raises exception if fails to read from file, silently passes if fails to read from resource.
+// Idea is:
+//   - By default built-in MAP is loaded, the binary is standalone
+//   - Release configs without MAP file raise no errors, user can check result with MapFileLoaded
+//   - If something changes, external MAP file has priority to not have to setup the new binary.
+//   - Existing binary built without MAP file could still load the external file if provided
+procedure LoadMapFile;
 var
   sl: TStringList;
+  rs: TResourceStream;
+  zds: TZDecompressionStream;
+  ss: TStringStream;
+begin
+  if FileExists(ChangeFileExt(ParamStr(0), '.map')) then
+  begin
+    sl := TStringList.Create;
+    sl.LoadFromFile(ChangeFileExt(ParamStr(0), '.map'), TEncoding.UTF8);
+    ReadMapFile(sl.Text);
+    sl.Free;
+  end
+  else
+  begin
+    rs := nil; zds := nil; ss := nil;
+    try
+      rs := TResourceStream.Create(HInstance, 'MapFileZ', RT_RCDATA);
+      zds := TZDecompressionStream.Create(rs);
+      ss := TStringStream.Create('', TEncoding.ASCII);
+      ss.LoadFromStream(zds);
+      ReadMapFile(ss.DataString);
+    except
+    end;
+    FreeAndNil(zds);
+    FreeAndNil(rs);
+    FreeAndNil(ss);
+  end;
+end;
+
+// Setup call stack handler and load MAP file
+procedure PrepareCallStacksAndMapFile;
+begin
+  InstallExceptionCallStack;
+  LoadMapFile;
+end;
+
+var
   ai: TMapFileAddrInfo;
   cl: TDemoClass;
 
 begin
-  // Setup our custom exception call stack mechanism
-  InstallExceptionCallStack;
+  // Init call stack and load MAP file
+  PrepareCallStacksAndMapFile;
 
-  // Load MAP file
-  sl := TStringList.Create;
-  sl.LoadFromFile(ChangeFileExt(ParamStr(0), '.map'), TEncoding.UTF8);
-  ReadMapFile(sl.Text);
-  sl.Free;
+  if not MapFileLoaded then
+  begin
+    Writeln('Can''t load MAP file from file or resource!');
+    Exit;
+  end
+  else
+    Writeln('MAP file loaded');
 
   // Demo1: get info about some address
   GetAddrInfo(@Nested2, ai);

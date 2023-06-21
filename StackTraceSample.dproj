@@ -40,6 +40,8 @@
 			<Base>true</Base>
 		</PropertyGroup>
 		<PropertyGroup Condition="'$(Base)'!=''">
+			<PostBuildEvent><![CDATA[$(BDS)\Tools\ResAdd.exe $(OUTPUTPATH) MapFileZ $(OUTPUTDIR)$(OUTPUTNAME).map compress
+$(PostBuildEvent)]]></PostBuildEvent>
 			<Manifest_File>None</Manifest_File>
 			<VerInfo_Locale>1049</VerInfo_Locale>
 			<DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
@@ -136,4 +138,36 @@
 		</ProjectExtensions>
 		<Import Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')" Project="$(BDS)\Bin\CodeGear.Delphi.Targets"/>
 		<Import Condition="Exists('$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj')" Project="$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj"/>
+		<PropertyGroup Condition="'$(Config)'=='Debug' And '$(Platform)'=='Win64'">
+			<PreBuildEvent/>
+			<PreBuildEventIgnoreExitCode>False</PreBuildEventIgnoreExitCode>
+			<PreLinkEvent/>
+			<PreLinkEventIgnoreExitCode>False</PreLinkEventIgnoreExitCode>
+			<PostBuildEvent>$(BDS)\Tools\ResAdd.exe $(OUTPUTPATH) MapFileZ $(OUTPUTDIR)$(OUTPUTNAME).map compress</PostBuildEvent>
+			<PostBuildEventIgnoreExitCode>False</PostBuildEventIgnoreExitCode>
+		</PropertyGroup>
+		<PropertyGroup Condition="'$(Config)'=='Debug' And '$(Platform)'=='Win32'">
+			<PreBuildEvent/>
+			<PreBuildEventIgnoreExitCode>False</PreBuildEventIgnoreExitCode>
+			<PreLinkEvent/>
+			<PreLinkEventIgnoreExitCode>False</PreLinkEventIgnoreExitCode>
+			<PostBuildEvent>$(BDS)\Tools\ResAdd.exe $(OUTPUTPATH) MapFileZ $(OUTPUTDIR)$(OUTPUTNAME).map compress</PostBuildEvent>
+			<PostBuildEventIgnoreExitCode>False</PostBuildEventIgnoreExitCode>
+		</PropertyGroup>
+		<PropertyGroup Condition="'$(Config)'=='Release' And '$(Platform)'=='Win64'">
+			<PreBuildEvent/>
+			<PreBuildEventIgnoreExitCode>False</PreBuildEventIgnoreExitCode>
+			<PreLinkEvent/>
+			<PreLinkEventIgnoreExitCode>False</PreLinkEventIgnoreExitCode>
+			<PostBuildEvent>$(BDS)\Tools\ResAdd.exe $(OUTPUTPATH) MapFileZ $(OUTPUTDIR)$(OUTPUTNAME).map compress</PostBuildEvent>
+			<PostBuildEventIgnoreExitCode>False</PostBuildEventIgnoreExitCode>
+		</PropertyGroup>
+		<PropertyGroup Condition="'$(Config)'=='Release' And '$(Platform)'=='Win32'">
+			<PreBuildEvent/>
+			<PreBuildEventIgnoreExitCode>False</PreBuildEventIgnoreExitCode>
+			<PreLinkEvent/>
+			<PreLinkEventIgnoreExitCode>False</PreLinkEventIgnoreExitCode>
+			<PostBuildEvent>$(BDS)\Tools\ResAdd.exe $(OUTPUTPATH) MapFileZ $(OUTPUTDIR)$(OUTPUTNAME).map compress</PostBuildEvent>
+			<PostBuildEventIgnoreExitCode>False</PostBuildEventIgnoreExitCode>
+		</PropertyGroup>
 	</Project>
